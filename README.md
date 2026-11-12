@@ -19,3 +19,4 @@ Google Quantum AI — Verifiable Quantum Circuit Compilation competition.
 - Automated testing
 - Documented research
 - Collaborative code review
+- Independent research and verified contributions.

@@ -1,0 +1,80 @@
+name: Team work package
+description: Propose a bounded, independently reviewable team task.
+title: "[team-task] "
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        All owner and reviewer entries begin as PROPOSED. Opening this issue does
+        not record member acceptance or authorize a benchmark run.
+  - type: input
+    id: task-id
+    attributes:
+      label: Task ID
+      description: Use the ID from the team task board when one exists.
+      placeholder: TEAM-00 or BENCH-TASK-NAME
+    validations:
+      required: true
+  - type: textarea
+    id: objective-scope
+    attributes:
+      label: Objective and scope
+      description: State the outcome and exact files/directories in scope.
+      placeholder: Describe the bounded work and its paths.
+    validations:
+      required: true
+  - type: input
+    id: proposed-owner
+    attributes:
+      label: Proposed owner
+      description: A proposed name is not an accepted assignment.
+      placeholder: Member name
+    validations:
+      required: true
+  - type: dropdown
+    id: acceptance-state
+    attributes:
+      label: Assignment acceptance state
+      description: Select ACCEPTED only after recording the member's explicit response, date, and channel.
+      options:
+        - PROPOSED
+        - ACCEPTED — explicit response recorded
+        - BLOCKED
+      default: 0
+    validations:
+      required: true
+  - type: textarea
+    id: deliverables-acceptance
+    attributes:
+      label: Deliverables and acceptance criteria
+      description: List concrete outputs and how a reviewer can verify them.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies-risks
+    attributes:
+      label: Dependencies and risks
+      description: Identify prerequisites, resource limits, and failure risks.
+    validations:
+      required: true
+  - type: input
+    id: proposed-reviewer
+    attributes:
+      label: Proposed reviewer
+      description: Reviewer assignment also remains proposed until accepted.
+    validations:
+      required: true
+  - type: textarea
+    id: tests-evidence
+    attributes:
+      label: Tests and evidence
+      description: State required checks, evidence level, and source records.
+    validations:
+      required: true
+  - type: textarea
+    id: restrictions-approval
+    attributes:
+      label: Restrictions and approval gates
+      description: State artifact boundaries and whether explicit benchmark approval is required.
+    validations:
+      required: true

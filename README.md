@@ -5,12 +5,14 @@ Google Quantum AI — Verifiable Quantum Circuit Compilation competition.
 
 ## Team Workflow
 
-- main: Verified releases only
-- develop: Main integration branch
+- main: Intended verified-release branch; protection unconfirmed
+- develop: Proposed integration branch (confirm before use)
 - research/: Research and algorithm analysis
 - feat/: Feature development
 - test/: Verification and regression testing
 - docs/: Research documentation
+- Current team roles and proposed assignments:
+  [docs/TEAM/TEAM_STRUCTURE.md](docs/TEAM/TEAM_STRUCTURE.md)
 
 ## Development Principles
 

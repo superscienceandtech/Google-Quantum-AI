@@ -3,8 +3,12 @@
 - **Updated:** 2026-11-19
 - **Owner:** Srijon
 - **Branch:** `feat/compiler-infrastructure`
-- **HEAD:** `7165220562da2bb34bf2700ee844ad4a312e3b13`
+- **HEAD:** `6c63c152972bd2e920ed72514dbb9bb7e4e1d6dd`
 - **Deadline:** 2026-11-20
+
+Evidence labels in this log use **VERIFIED LOCALLY**, **VERIFIED UPSTREAM**,
+**VERIFIED OFFICIAL**, **PAPER-DERIVED**, **ENGINEERING PROPOSAL**,
+**BLOCKED**, and **UNKNOWN**. They classify evidence, not project approval.
 
 This log separates implemented work from proposed and blocked work. The
 architecture/API evidence and full current-state analysis are in
@@ -19,25 +23,27 @@ pinned-source and benchmark-contract record is
 
 ## Status summary
 
-| Workstream | Status | Evidence / next gate |
+| Workstream | Evidence status | Evidence / next gate |
 |---|---|---|
-| Repository reconnaissance | **COMPLETE** | Current tree, branch, HEAD, README diff/hash, tracked/untracked inventory inspected. |
-| Kickmix API reference | **PARTIAL** | Dossier records APIs/source at Qualtran commit `f559b12af459e7e97e6c6c382434431c03b903c9`; this remains an upstream reference, not a project API. |
-| Benchmark paper contracts | **PARTIAL** | Paper-derived contracts recorded; executable verifier/data-level specifics remain blocked. |
+| Repository reconnaissance | **VERIFIED LOCALLY** | Current tree, branch, HEAD, README diff/hash, tracked/untracked inventory inspected. |
+| Kickmix API reference | **VERIFIED UPSTREAM** | Dossier records source at Qualtran commit `f559b12af459e7e97e6c6c382434431c03b903c9`; this remains an upstream reference, not a project API. |
+| Benchmark paper contracts | **PAPER-DERIVED** | Paper-described contracts are recorded; executable verifier/data-level specifics are **BLOCKED**. |
 | Project architecture / IR | **BLOCKED** | No approved architecture or project IR in the visible committed tree. |
-| SHA-256 artifact checker | **IMPLEMENTED / TESTED** | `tools/verify_sha256.py`; standard-library-only; bounded-memory hash, descriptor validation and explicit CLI outcomes. |
-| Checker tests | **TESTED** | Thirteen `unittest` tests passed, including path-safe diagnostics, named-pipe and symlink regressions. |
-| Compiler-neutral execution infrastructure | **IMPLEMENTED / TESTED PROPOSAL** | `tools/compiler_infrastructure.py`; versioned contracts, injected execution/verification, artifact checks, deterministic manifests, and structured outcomes. |
-| Infrastructure integration tests | **TESTED** | Forty standard-library tests use explicit test doubles; no real compiler or official verifier is claimed. |
-| Project build system | **BLOCKED / NOT PRESENT** | No project build metadata or execution entry point. |
-| Project-wide test system | **NOT PRESENT** | Standard-library `unittest` covers the checker and compiler-neutral infrastructure proposal, not a compiler or benchmark system. |
+| SHA-256 artifact checker | **VERIFIED LOCALLY** | `tools/verify_sha256.py`; standard-library-only; bounded-memory hash, descriptor validation and explicit CLI outcomes. |
+| Checker tests | **VERIFIED LOCALLY** | Thirteen historical `unittest` tests passed, including path-safe diagnostics, named-pipe and symlink regressions. |
+| Compiler-neutral execution infrastructure | **ENGINEERING PROPOSAL** | `tools/compiler_infrastructure.py`; versioned contracts, injected execution/verification, artifact checks, deterministic manifests, and structured outcomes; tests use test doubles. |
+| Infrastructure integration tests | **VERIFIED LOCALLY** | Standard-library tests exercise lifecycle behavior with explicit test doubles; no real compiler or official verifier is claimed. |
+| Local KMX compiler / optimizer | **VERIFIED LOCALLY** | KMX parser, serializer, CLI, and adjacent-involution pass have focused tests; upstream differential execution is **BLOCKED**. |
+| Global score aggregation | **VERIFIED OFFICIAL / VERIFIED LOCALLY** | The formula is sourced from the visible metric and implemented locally; complete scorer equivalence is **BLOCKED**. |
+| Project build system | **BLOCKED** | No project build metadata or official competition execution entry point; a local KMX CLI exists. |
+| Project-wide test system | **VERIFIED LOCALLY** | `unittest` covers local utilities, infrastructure, KMX, optimizer, and scoring helper; it is not an official benchmark system. |
 | Official verifier/scorer | **BLOCKED** | No official implementation/interface or fixtures available in the checkout. |
-| Benchmark adapters | **NOT STARTED / BLOCKED** | Must wait for authoritative schemas, registers, serialization and verifier contracts. |
-| Dependency pinning | **NOT STARTED / BLOCKED** | No project dependency manifest or approved toolchain boundary. |
-| Reproducible project baseline | **NOT STARTED / BLOCKED** | Requires a confirmed project entry point and architecture. |
-| Architecture/environment/dependency reports | **COMPLETE** | Added evidence-classified docs; these do not constitute an approved architecture or project build specification. |
+| Benchmark adapters | **BLOCKED** | Must wait for authoritative schemas, registers, serialization and verifier contracts. |
+| Dependency pinning | **BLOCKED** | No project dependency manifest or approved toolchain boundary. |
+| Reproducible project baseline | **BLOCKED** | Requires a confirmed project entry point and architecture. |
+| Architecture/environment/dependency reports | **VERIFIED LOCALLY** | Evidence-classified docs do not constitute an approved architecture or project build specification. |
 
-## Completed this audit
+## Prior Phase 7 audit snapshot (historical)
 
 1. Reconfirmed branch and commit, `feat/compiler-infrastructure` at
    `7165220562da2bb34bf2700ee844ad4a312e3b13`.
@@ -169,3 +175,60 @@ those blocked project contracts.
     no diagnostics. Import inventory was verified through an AST audit.
 - No dependencies were installed. No project build, real compiler, benchmark,
   or official verifier was available or claimed.
+
+## Local KMX compiler milestone — 2026-11-19
+
+- Added `tools/kickmix_compiler.py`: bounded KMX v2 parser/validator,
+  deterministic serializer, structural resource summary, SHA-256 provenance,
+  and non-overwriting CLI.
+- Added `tools/participant_optimizer.py`: a deterministic adjacent identical
+  involution cancellation pass with conservative guards.
+- Added `tools/official_scoring.py`: the positive-cost geometric-mean formula
+  from the retrieved metric source; row matching and verifier costs remain
+  outside this helper.
+- Added focused tests for syntax/serialization, deterministic provenance,
+  output protection, score edge cases, and exhaustive small-state equivalence
+  for the optimizer's supported subset.
+- No benchmark adapter, KMB output, official verifier run, or competition
+  compatibility claim was added. See the [completion matrix](implementation-completion-matrix.md)
+  and [master completion report](master-implementation-completion-report.md).
+
+## Final correctness, security, and compatibility audit — 2026-11-19
+
+- Rechecked branch `feat/compiler-infrastructure`, HEAD
+  `6c63c152972bd2e920ed72514dbb9bb7e4e1d6dd`, and upstream tracking; no
+  changes were staged. The pre-existing README modification and untracked
+  dossier/reports were preserved. All four protected-file hashes match the
+  recorded baseline.
+- Fixed compiler-infrastructure failure-manifest redaction and input
+  re-verification on executor failure/exception paths; added regression tests.
+- Tightened KMX type validation, sparse/unnamed register handling, duplicate
+  name validation, compiler-profile limits, and repeated multi-qubit operand
+  validation; added regressions. Optimizer tests now model condition-stack
+  snapshots and nested/explicit conditions and avoid claiming general quantum
+  equivalence.
+- Fixed the `python -m tools.kickmix_compiler` entry point's duplicate module
+  identity problem; the CLI now passes a temporary-file compile regression.
+- Final validation: the full standard-library suite passed, exit 0,
+  `Ran 111 tests`; focused KMX/optimizer tests passed (19), artifact
+  lifecycle/security tests passed (76), and scoring tests passed (3). AST
+  validation passed for all nine Python files. Final Pylance diagnostics were
+  empty for the changed production modules and tests. CLI help and
+  representative temporary compilation passed.
+- Targeted `git diff --check` passes for files changed during this audit.
+  Checking the protected README reports its pre-existing trailing whitespace
+  at line 21; it was not edited and its SHA-256 is unchanged.
+- Pinned upstream Qualtran/Kickmix source was inspected, but differential
+  execution remains **BLOCKED** because Kickmix/Qualtran/Bazel are unavailable.
+  No dependency was installed. No official verifier/scorer, benchmark fixture,
+  adapter result, or benchmark acceptance is claimed. Manifest reproducibility
+  remains explicitly **LEVEL 0**.
+- Verified artifact handoff now uses privately stored, content-checked
+  snapshots to prevent a concurrent source writer from changing verifier input
+  after verification. Temporary space scales with artifact size; no independent
+  snapshot quota or isolation from malicious in-process adapters is claimed.
+- The Phase 7 report's recorded baseline hash
+  (`087b3aa016e438262f9390db5d7a621c9bc0bc5a913c3fe0949a3d1f9abc98c3`)
+  matches the observed file hash. A different newer supplied hash was not
+  present in the available task context, so that comparison remains
+  **UNKNOWN** rather than evidence of a file change.

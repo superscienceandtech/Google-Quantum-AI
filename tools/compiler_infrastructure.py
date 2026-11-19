@@ -21,6 +21,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -441,7 +442,7 @@ def _read_bounded_pipe(
     limit: int,
     state: dict,
     stop_event: threading.Event,
-    output_limit_event: threading.Event,
+    overflow_event: Optional[threading.Event],
 ) -> None:
     captured = bytearray()
     overflow = False
@@ -462,7 +463,8 @@ def _read_bounded_pipe(
                 captured.extend(chunk[:remaining])
             if len(chunk) > remaining:
                 overflow = True
-                output_limit_event.set()
+                if overflow_event is not None:
+                    overflow_event.set()
     except (OSError, ValueError) as error:
         state["error"] = error
     state["bytes"] = bytes(captured)
@@ -903,7 +905,7 @@ class SubprocessCompilerExecutor:
                 _MAX_SUBPROCESS_STDERR_BYTES,
                 stderr_state,
                 stop_event,
-                output_limit_event,
+                None,
             ),
             daemon=True,
         )
@@ -1224,9 +1226,23 @@ class ManifestPublicationError(OSError):
 class ArtifactStore:
     """Access root-relative artifacts through a retained directory descriptor."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        snapshot_limit_bytes: Optional[int] = None,
+        snapshot_total_limit_bytes: Optional[int] = None,
+    ) -> None:
         if not isinstance(root, Path):
             raise TypeError("artifact root must be a pathlib.Path")
+        for name, value in (
+            ("snapshot_limit_bytes", snapshot_limit_bytes),
+            ("snapshot_total_limit_bytes", snapshot_total_limit_bytes),
+        ):
+            if value is not None and (
+                type(value) is not int or value < 0
+            ):
+                raise ValueError(f"{name} must be a non-negative integer or None")
         required_dir_fd_apis = (os.open, os.mkdir, os.link, os.unlink)
         if (
             any(api not in os.supports_dir_fd for api in required_dir_fd_apis)
@@ -1247,6 +1263,10 @@ class ArtifactStore:
         self.root = Path(os.path.abspath(root))
         self._root_fd = descriptor
         self._closed = False
+        self.snapshot_limit_bytes = snapshot_limit_bytes
+        self.snapshot_total_limit_bytes = snapshot_total_limit_bytes
+        self._active_snapshot_bytes = 0
+        self._snapshot_lock = threading.Lock()
 
     def close(self) -> None:
         if not self._closed:
@@ -1341,18 +1361,83 @@ class ArtifactStore:
             raise OSError(errno.EBUSY, "artifact changed while hashing")
         return actual_digest
 
+    def _reserve_snapshot(self, size: int) -> None:
+        if self.snapshot_limit_bytes is not None and size > self.snapshot_limit_bytes:
+            raise OSError(
+                errno.ENOSPC,
+                "verified snapshot exceeds configured artifact limit",
+            )
+        with self._snapshot_lock:
+            if (
+                self.snapshot_total_limit_bytes is not None
+                and self._active_snapshot_bytes + size
+                > self.snapshot_total_limit_bytes
+            ):
+                raise OSError(
+                    errno.ENOSPC,
+                    "verified snapshots exceed configured aggregate limit",
+                )
+            self._active_snapshot_bytes += size
+
+    def _release_snapshot(self, size: int) -> None:
+        with self._snapshot_lock:
+            self._active_snapshot_bytes = max(
+                0,
+                self._active_snapshot_bytes - size,
+            )
+
     @contextlib.contextmanager
     def open_verified(self, reference: ArtifactReference) -> Generator[BinaryIO, None, None]:
-        """Yield a read-only stream and revalidate it when the consumer is done."""
+        """Yield a verified snapshot and revalidate the source after use."""
         if not isinstance(reference, ArtifactReference):
             raise TypeError("reference must be an ArtifactReference")
         descriptor = self._open_artifact(reference)
+        snapshot = None
+        reserved_size = 0
+        reservation_successful = False
         try:
-            if self._hash_descriptor(descriptor) != reference.sha256:
+            before = os.fstat(descriptor)
+            before_state = (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            )
+            reserved_size = before.st_size
+            self._reserve_snapshot(reserved_size)
+            reservation_successful = True
+            snapshot = tempfile.TemporaryFile(mode="w+b")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            digest = hashlib.sha256()
+            with os.fdopen(descriptor, "rb", closefd=False) as source:
+                while chunk := source.read(1024 * 1024):
+                    snapshot.write(chunk)
+                    digest.update(chunk)
+            after = os.fstat(descriptor)
+            before_state = (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            )
+            after_state = (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
+            if before_state != after_state:
+                raise OSError(errno.EBUSY, "artifact changed while snapshotting")
+            if digest.hexdigest() != reference.sha256:
                 raise ArtifactIntegrityError(
                     f"SHA-256 mismatch for artifact {reference.path}"
                 )
-            with os.fdopen(descriptor, "rb", closefd=False) as artifact:
+            snapshot.flush()
+            snapshot.seek(0)
+            with os.fdopen(os.dup(snapshot.fileno()), "rb") as artifact:
                 try:
                     yield artifact
                 finally:
@@ -1360,8 +1445,29 @@ class ArtifactStore:
                         raise ArtifactIntegrityError(
                             f"artifact changed while in use: {reference.path}"
                         )
+                    current = os.fstat(descriptor)
+                    current_state = (
+                        current.st_dev,
+                        current.st_ino,
+                        current.st_size,
+                        current.st_mtime_ns,
+                        current.st_ctime_ns,
+                    )
+                    if current_state != before_state:
+                        raise OSError(
+                            errno.EBUSY,
+                            f"artifact identity changed while in use: {reference.path}",
+                        )
         finally:
-            os.close(descriptor)
+            try:
+                if snapshot is not None:
+                    snapshot.close()
+            finally:
+                try:
+                    os.close(descriptor)
+                finally:
+                    if reservation_successful:
+                        self._release_snapshot(reserved_size)
 
     def verify(self, reference: ArtifactReference) -> str:
         descriptor = self._open_artifact(reference)
@@ -1621,7 +1727,7 @@ def _failure_manifest(
             "architecture": platform.machine(),
         },
         "reproducibility": _reproducibility_metadata(executor_configuration),
-        "request": request.to_dict(),
+        "request": _redact_sensitive_json(request.to_dict()),
         "executor": _executor_manifest_data(
             executor_name, executor_version, executor_configuration
         ),
@@ -1697,6 +1803,8 @@ def run_compilation(
     executor_name = None
     executor_version = None
     executor_configuration = None
+    compilation = None
+    executor_error = None
     try:
         context = ExecutionContext(artifact_store.root, output_dir, request.seed)
         executor_name = executor.name
@@ -1710,17 +1818,62 @@ def run_compilation(
             executor_configuration = executor.reproducibility_metadata(request)
         compilation = executor.compile(request, context)
     except Exception as error:
-        category = _component_failure_category(error, FailureCategory.EXECUTION_FAILURE)
-        if isinstance(error, CompilerProcessTimeout):
-            message = str(error)
-        elif isinstance(error, FileNotFoundError):
+        executor_error = error
+
+    if isinstance(compilation, CompilationResult):
+        compilation = CompilationResult(
+            compilation.status,
+            compilation.artifacts,
+            tuple(
+                _redact_text_values(item, request_sensitive_values)
+                for item in compilation.diagnostics
+            ),
+        )
+
+    try:
+        for input_reference in request.inputs:
+            artifact_store.verify(input_reference)
+    except (OSError, RuntimeError, ValueError, TypeError) as error:
+        category = _artifact_failure_category(error)
+        failure = RunFailure(category, type(error).__name__)
+        failure_manifest, manifest_error = _failure_manifest(
+            artifact_store,
+            run_dir,
+            request,
+            executor_name,
+            executor_version,
+            category,
+            failure.message,
+            compilation if isinstance(compilation, CompilationResult) else None,
+            executor_configuration,
+        )
+        if manifest_error is not None:
+            failure = RunFailure(
+                category,
+                f"{failure.message}; failure manifest {manifest_error}",
+            )
+        return _report(
+            request.request_id,
+            RunStatus.FAILED,
+            compilation if isinstance(compilation, CompilationResult) else None,
+            manifest=failure_manifest,
+            failure=failure,
+        )
+
+    if executor_error is not None:
+        category = _component_failure_category(
+            executor_error, FailureCategory.EXECUTION_FAILURE
+        )
+        if isinstance(executor_error, CompilerProcessTimeout):
+            message = str(executor_error)
+        elif isinstance(executor_error, FileNotFoundError):
             message = "configured compiler executable was not found"
-        elif isinstance(error, SubprocessRequestError):
+        elif isinstance(executor_error, SubprocessRequestError):
             message = "subprocess request could not be serialized"
-        elif isinstance(error, InvalidSubprocessResponse):
-            message = str(error)
+        elif isinstance(executor_error, InvalidSubprocessResponse):
+            message = str(executor_error)
         else:
-            message = f"executor raised {type(error).__name__}"
+            message = f"executor raised {type(executor_error).__name__}"
         failure = RunFailure(category, message)
         failure_manifest, manifest_error = _failure_manifest(
             artifact_store,
@@ -1767,14 +1920,6 @@ def run_compilation(
             manifest=failure_manifest,
             failure=failure,
         )
-    compilation = CompilationResult(
-        compilation.status,
-        compilation.artifacts,
-        tuple(
-            _redact_text_values(item, request_sensitive_values)
-            for item in compilation.diagnostics
-        ),
-    )
     if compilation.status is CompilationStatus.FAILED:
         failure = RunFailure(FailureCategory.EXECUTION_FAILURE, "compilation reported failure")
         failure_manifest, manifest_error = _failure_manifest(

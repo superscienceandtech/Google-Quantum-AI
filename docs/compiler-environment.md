@@ -2,27 +2,26 @@
 
 - **Updated:** 2026-11-19
 - **Current project snapshot:** branch `feat/compiler-infrastructure`,
-  commit `7165220562da2bb34bf2700ee844ad4a312e3b13`
-- **Status:** records verified utility and generic infrastructure workflows.
+  commit `6c63c152972bd2e920ed72514dbb9bb7e4e1d6dd`
+- **Status:** records verified utility, generic infrastructure, and local KMX
+  workflows.
   It is not a build guide for a competition compiler or benchmarks.
 
 ## Evidence and scope
 
-- **VERIFIED LOCALLY:** observations and commands actually run in this
-  checkout.
-- **UPSTREAM-DOCUMENTED:** requirements found in the pinned Qualtran/Kickmix
-  documentation; these are not project requirements.
-- **PROPOSED:** a useful workflow not yet approved or validated for a
-  compiler/benchmark project entry point.
-- **BLOCKED / UNVERIFIED:** unavailable or not established by the current
-  repository.
+This document uses the audit taxonomy: **VERIFIED LOCALLY**,
+**VERIFIED UPSTREAM**, **VERIFIED OFFICIAL**, **PAPER-DERIVED**,
+**ENGINEERING PROPOSAL**, **BLOCKED**, and **UNKNOWN**. Upstream requirements
+do not establish project requirements.
 
 The committed project has a Python SHA-256 utility and a standard-library
-`unittest` suite. The current worktree additionally contains a compiler-neutral
-infrastructure proposal with injected executor/verifier protocols and a local
-subprocess executor; it is not a project compiler, circuit runtime, official
-verifier, or benchmark execution entry point (**VERIFIED LOCALLY / PROPOSED
-INTERFACE**).
+`unittest` suite. The current worktree additionally contains a locally
+implemented KMX parser/optimizer and a global score aggregation helper; these
+do not establish official benchmark behavior. It also contains a
+compiler-neutral infrastructure proposal with injected executor/verifier
+protocols and a local subprocess executor (**VERIFIED LOCALLY**;
+**ENGINEERING PROPOSAL** interface). No official verifier or benchmark
+execution entry point is available (**BLOCKED**).
 
 ## Observed environment
 
@@ -47,8 +46,8 @@ platform matrix.
 
 ## Reproduce the standalone utility tests
 
-From the repository root, using Python 3.8+ on a POSIX platform supporting
-`dir_fd`, `O_NOFOLLOW`, and `O_DIRECTORY`:
+From the repository root, using Python 3.10+ for the full local worktree on a
+POSIX platform supporting `dir_fd`, `O_NOFOLLOW`, and `O_DIRECTORY`:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
@@ -62,20 +61,31 @@ The historical Phase 7 observed result in this environment was exit status 0,
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 ```
 
-Tests cover the digest utility, compiler-neutral lifecycle, and subprocess
-workflows using temporary Python commands and test-double verifiers. These are
-not competition compiler, Kickmix, benchmark, official verifier, or scoring
-tests. The default process backend requires POSIX process-group support;
+The final infrastructure/KMX audit run on 2026-11-19 observed exit status 0,
+`Ran 111 tests`, `OK`. Focused runs also passed: KMX compiler/optimizer
+(`19` tests), artifact lifecycle/security (`76` tests), and scoring aggregation
+(`3` tests). These results are **VERIFIED LOCALLY**, not upstream differential
+or official benchmark validation.
+
+Tests cover the digest utility, compiler-neutral lifecycle, local KMX parser
+and optimizer, score aggregation, and subprocess workflows using temporary
+Python commands and test-double verifiers. These are not upstream differential
+Kickmix, benchmark, official verifier, or full scorer tests. The default
+process backend requires POSIX process-group support;
 alternative lifecycle backends can be injected, but their declared
 containment guarantees are not independently validated by this infrastructure.
+The KMX module CLI help and a representative compile in temporary files also
+completed successfully; output was verified byte-for-byte and its JSON
+provenance parsed successfully (**VERIFIED LOCALLY**).
 
 Check Python syntax without writing bytecode:
 
 ```sh
-python3 -B -c 'import ast, pathlib; paths=("tools/verify_sha256.py", "tests/test_verify_sha256.py", "tools/compiler_infrastructure.py", "tests/test_compiler_infrastructure.py"); [ast.parse(pathlib.Path(path).read_text(), filename=path) for path in paths]; print("Syntax OK:", ", ".join(paths))'
+python3 -B -c 'import ast,pathlib; paths=sorted(pathlib.Path("tools").glob("*.py"))+sorted(pathlib.Path("tests").glob("*.py")); [ast.parse(path.read_text(encoding="utf-8"), filename=str(path)) for path in paths]; print(f"AST syntax OK: {len(paths)} Python files")'
 ```
 
-Observed result: exit status 0; all four listed files parsed successfully. The utility
+Observed result: exit status 0; all nine local Python source/test files parsed
+successfully. The utility
 can be invoked from the repository root as:
 
 ```sh
@@ -98,6 +108,9 @@ publisher.
 - Tests use `tempfile` and clean up their own temporary directories.
 - `PYTHONDONTWRITEBYTECODE=1` prevents test bytecode output; the syntax command
   uses `-B`.
+- The full local worktree uses Python 3.10+ annotation syntax. This is a local
+  syntax requirement, not an approved project support matrix; the supported
+  project interpreter remains **UNKNOWN**.
 - Input files are opened read-only by the utility. It does not create output
   artifacts.
 - Permission errors and every platform's path behavior have not been
@@ -106,11 +119,21 @@ publisher.
   stat/open path replacement window. Platforms that do not provide
   `O_NOFOLLOW` may follow a symlink; descriptor `fstat` then validates the
   opened object but cannot establish that the caller named it directly.
-- The project has no documented minimum Python version. The utility syntax
-  uses the assignment expression introduced in Python 3.8; compatibility with
-  older Python versions is not claimed.
+The project has no approved minimum Python version. Compatibility with
+interpreters older than Python 3.10 is not claimed for the current full
+worktree.
 
-## Upstream-only build notes
+Print the observed interpreter and platform metadata:
+
+```sh
+python3 -c 'import platform,sys; print("executable="+sys.executable); print("implementation="+platform.python_implementation()); print("python_version="+platform.python_version()); print("platform="+sys.platform); print("architecture="+platform.machine())'
+```
+
+Observed result in this audit: `/usr/bin/python3`, CPython 3.12.3, `linux`,
+`x86_64` (**VERIFIED LOCALLY**). This reports the current process environment;
+it does not certify a supported runtime matrix.
+
+## VERIFIED UPSTREAM build notes
 
 The existing dossier records upstream Kickmix build instructions for
 Qualtran commit `f559b12af459e7e97e6c6c382434431c03b903c9`, including Bazel

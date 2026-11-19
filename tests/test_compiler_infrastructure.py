@@ -55,6 +55,8 @@ class TestDoubleExecutor:
         mutate_input=False,
         partial_output=False,
         output_reference_path=None,
+        failed=False,
+        diagnostics=(),
     ):
         self.raises = raises
         self.malformed = malformed
@@ -63,6 +65,8 @@ class TestDoubleExecutor:
         self.mutate_input = mutate_input
         self.partial_output = partial_output
         self.output_reference_path = output_reference_path
+        self.failed = failed
+        self.diagnostics = diagnostics
 
     def compile(self, request, context):
         if self.mutate_input:
@@ -74,6 +78,8 @@ class TestDoubleExecutor:
             raise self.exception_type("test-only executor failure")
         if self.malformed:
             return {"status": "succeeded"}
+        if self.failed:
+            return CompilationResult(CompilationStatus.FAILED)
         output = context.output_dir / "candidate.bin"
         output.write_bytes(b"candidate artifact")
         digest = self.artifact_digest or hashlib.sha256(output.read_bytes()).hexdigest()
@@ -82,7 +88,11 @@ class TestDoubleExecutor:
             or f"runs/{request.request_id}/outputs/candidate.bin",
             digest,
         )
-        return CompilationResult(CompilationStatus.SUCCEEDED, (reference,))
+        return CompilationResult(
+            CompilationStatus.SUCCEEDED,
+            (reference,),
+            self.diagnostics,
+        )
 
 
 class TestDoubleVerifier:
@@ -1072,6 +1082,99 @@ print(json.dumps({
         self.assertEqual(report.failure.category, FailureCategory.INTEGRITY_MISMATCH)
         self.assertEqual(report.verification.status, VerificationStatus.NOT_EXECUTED)
 
+    def test_executor_input_mutation_is_detected_when_executor_raises(self):
+        report = run_compilation(
+            self.request,
+            TestDoubleExecutor(mutate_input=True, raises=True),
+            TestDoubleVerifier(),
+            self.store,
+        )
+
+        self.assertEqual(report.status, RunStatus.FAILED)
+        self.assertEqual(report.failure.category, FailureCategory.INTEGRITY_MISMATCH)
+        self.assertIsNone(report.compilation)
+        self.assertEqual((self.root / "source.bin").read_bytes(), b"mutated input")
+
+    def test_executor_input_mutation_is_detected_when_compilation_fails(self):
+        report = run_compilation(
+            self.request,
+            TestDoubleExecutor(mutate_input=True, failed=True),
+            TestDoubleVerifier(),
+            self.store,
+        )
+
+        self.assertEqual(report.status, RunStatus.FAILED)
+        self.assertEqual(report.failure.category, FailureCategory.INTEGRITY_MISMATCH)
+        self.assertEqual(report.compilation.status, CompilationStatus.FAILED)
+        self.assertEqual((self.root / "source.bin").read_bytes(), b"mutated input")
+
+    def test_input_mutation_failure_manifest_redacts_executor_diagnostics(self):
+        secret = "mutation-diagnostic-secret-9c2a"
+        request = CompilationRequest(
+            "mutation-redaction",
+            self.request.inputs,
+            {"api_token": secret},
+        )
+        report = run_compilation(
+            request,
+            TestDoubleExecutor(
+                mutate_input=True,
+                diagnostics=(secret,),
+            ),
+            TestDoubleVerifier(),
+            self.store,
+        )
+
+        manifest_text = self.read_verified(self.store, report.manifest).decode("utf-8")
+        manifest = json.loads(manifest_text)
+        self.assertEqual(report.failure.category, FailureCategory.INTEGRITY_MISMATCH)
+        self.assertNotIn(secret, manifest_text)
+        self.assertEqual(
+            manifest["compilation"]["diagnostics"], ["<redacted-request>"]
+        )
+
+    def test_failure_manifests_redact_sensitive_request_values(self):
+        secret = "failure-manifest-token-5d7a"
+        request = CompilationRequest(
+            "failure-redaction",
+            self.request.inputs,
+            {"api_token": secret, "visible": "not-secret"},
+        )
+        report = run_compilation(
+            request,
+            TestDoubleExecutor(raises=True),
+            TestDoubleVerifier(),
+            self.store,
+        )
+
+        manifest_text = self.read_verified(self.store, report.manifest).decode("utf-8")
+        manifest = json.loads(manifest_text)
+        self.assertEqual(report.status, RunStatus.FAILED)
+        self.assertNotIn(secret, manifest_text)
+        self.assertEqual(manifest["request"]["options"]["api_token"], "<redacted>")
+        self.assertEqual(manifest["request"]["options"]["visible"], "not-secret")
+
+        failed_request = CompilationRequest(
+            "failed-redaction",
+            self.request.inputs,
+            {"api_token": secret},
+        )
+        failed_report = run_compilation(
+            failed_request,
+            TestDoubleExecutor(failed=True),
+            TestDoubleVerifier(),
+            self.store,
+        )
+        failed_manifest_text = self.read_verified(
+            self.store, failed_report.manifest
+        ).decode("utf-8")
+        failed_manifest = json.loads(failed_manifest_text)
+        self.assertEqual(failed_report.compilation.status, CompilationStatus.FAILED)
+        self.assertNotIn(secret, failed_manifest_text)
+        self.assertEqual(
+            failed_manifest["request"]["options"]["api_token"], "<redacted>"
+        )
+
     def test_verifier_output_mutation_is_detected_after_handoff(self):
         report = run_compilation(
             self.request,
@@ -1086,7 +1189,7 @@ print(json.dumps({
         manifest = json.loads(self.read_verified(self.store, report.manifest))
         self.assertEqual(manifest["run_status"], "failed")
 
-    def test_verifier_receives_verified_descriptor_streams(self):
+    def test_verifier_receives_verified_snapshot_streams(self):
         class ReadingVerifier:
             name = "descriptor-reading-verifier"
             version = "1"
@@ -1336,6 +1439,333 @@ print(json.dumps({
             with self.store.open_verified(self.input_reference) as artifact:
                 artifact.read()
                 (self.root / "source.bin").write_bytes(b"mutated while open")
+
+    def test_open_verified_snapshot_is_stable_if_source_changes_and_is_restored(self):
+        source = self.root / "source.bin"
+        with self.assertRaises(OSError):
+            with self.store.open_verified(self.input_reference) as artifact:
+                snapshot_bytes = artifact.read()
+                self.assertFalse(artifact.writable())
+                source.write_bytes(b"temporary concurrent mutation")
+                source.write_bytes(self.input_bytes)
+        self.assertEqual(snapshot_bytes, self.input_bytes)
+
+    def test_artifact_store_rejects_invalid_snapshot_limits(self):
+        for keyword in (
+            {"snapshot_limit_bytes": -1},
+            {"snapshot_total_limit_bytes": -1},
+            {"snapshot_limit_bytes": True},
+            {"snapshot_total_limit_bytes": 1.5},
+        ):
+            with self.subTest(keyword=keyword), self.assertRaises(ValueError):
+                ArtifactStore(self.root, **keyword)
+
+    def test_open_verified_enforces_explicit_per_snapshot_limit(self):
+        store = ArtifactStore(
+            self.root,
+            snapshot_limit_bytes=len(self.input_bytes) - 1,
+        )
+        self.addCleanup(store.close)
+        with self.assertRaisesRegex(OSError, "artifact limit"):
+            with store.open_verified(self.input_reference):
+                pass
+
+    def test_open_verified_enforces_explicit_aggregate_snapshot_limit(self):
+        store = ArtifactStore(
+            self.root,
+            snapshot_total_limit_bytes=len(self.input_bytes),
+        )
+        self.addCleanup(store.close)
+        with store.open_verified(self.input_reference):
+            with self.assertRaisesRegex(OSError, "aggregate limit"):
+                with store.open_verified(self.input_reference):
+                    pass
+            self.assertEqual(store._active_snapshot_bytes, len(self.input_bytes))
+        self.assertEqual(store._active_snapshot_bytes, 0)
+
+    def test_failed_snapshot_allocation_releases_successful_reservation(self):
+        store = ArtifactStore(
+            self.root,
+            snapshot_limit_bytes=len(self.input_bytes),
+            snapshot_total_limit_bytes=len(self.input_bytes),
+        )
+        self.addCleanup(store.close)
+        with patch(
+            "tools.compiler_infrastructure.tempfile.TemporaryFile",
+            side_effect=OSError("temporary snapshot allocation failed"),
+        ):
+            with self.assertRaisesRegex(OSError, "temporary snapshot allocation"):
+                with store.open_verified(self.input_reference):
+                    pass
+        self.assertEqual(store._active_snapshot_bytes, 0)
+
+    def test_digest_mismatch_after_reservation_releases_accounting(self):
+        wrong_reference = ArtifactReference(
+            self.input_reference.path,
+            "0" * 64,
+        )
+        store = ArtifactStore(
+            self.root,
+            snapshot_limit_bytes=len(self.input_bytes),
+            snapshot_total_limit_bytes=len(self.input_bytes),
+        )
+        self.addCleanup(store.close)
+        with self.assertRaises(ArtifactIntegrityError):
+            with store.open_verified(wrong_reference):
+                pass
+        self.assertEqual(store._active_snapshot_bytes, 0)
+
+    def test_source_metadata_change_during_verification_is_rejected(self):
+        source = self.root / "source.bin"
+        store = ArtifactStore(
+            self.root,
+            snapshot_total_limit_bytes=len(self.input_bytes),
+        )
+        self.addCleanup(store.close)
+        with self.assertRaises(OSError):
+            with store.open_verified(self.input_reference):
+                metadata = os.stat(source)
+                os.utime(
+                    source,
+                    ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1_000_000_000),
+                )
+        self.assertEqual(store._active_snapshot_bytes, 0)
+
+    def test_stream_initialization_failure_releases_reservation(self):
+        store = ArtifactStore(
+            self.root,
+            snapshot_limit_bytes=len(self.input_bytes),
+            snapshot_total_limit_bytes=len(self.input_bytes),
+        )
+        self.addCleanup(store.close)
+        with patch(
+            "tools.compiler_infrastructure.os.fdopen",
+            side_effect=OSError("stream initialization failed"),
+        ):
+            with self.assertRaisesRegex(OSError, "stream initialization"):
+                with store.open_verified(self.input_reference):
+                    pass
+        self.assertEqual(store._active_snapshot_bytes, 0)
+
+    def test_snapshot_release_is_safe_after_repeated_cleanup(self):
+        store = ArtifactStore(
+            self.root,
+            snapshot_total_limit_bytes=len(self.input_bytes),
+        )
+        self.addCleanup(store.close)
+        store._reserve_snapshot(len(self.input_bytes))
+        self.assertEqual(store._active_snapshot_bytes, len(self.input_bytes))
+        store._release_snapshot(len(self.input_bytes))
+        store._release_snapshot(len(self.input_bytes))
+        self.assertEqual(store._active_snapshot_bytes, 0)
+
+    def test_concurrent_snapshot_reservations_cannot_exceed_aggregate_limit(self):
+        store = ArtifactStore(
+            self.root,
+            snapshot_limit_bytes=len(self.input_bytes),
+            snapshot_total_limit_bytes=len(self.input_bytes),
+        )
+        self.addCleanup(store.close)
+        first_reserved = threading.Event()
+        release_first = threading.Event()
+
+        def first_reservation():
+            with store.open_verified(self.input_reference):
+                first_reserved.set()
+                if not release_first.wait(timeout=5):
+                    raise RuntimeError("first snapshot was not released")
+            return "reserved"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first_future = pool.submit(first_reservation)
+            self.assertTrue(first_reserved.wait(timeout=5))
+            try:
+                with store.open_verified(self.input_reference):
+                    raise AssertionError("second reservation unexpectedly succeeded")
+            except OSError:
+                pass
+            self.assertEqual(store._active_snapshot_bytes, len(self.input_bytes))
+            release_first.set()
+            self.assertEqual(first_future.result(timeout=5), "reserved")
+
+        self.assertEqual(store._active_snapshot_bytes, 0)
+
+    def test_two_successful_snapshots_close_in_different_orders(self):
+        second = self.root / "second.bin"
+        second_bytes = b"second artifact"
+        second.write_bytes(second_bytes)
+        second_reference = ArtifactReference(
+            "second.bin",
+            hashlib.sha256(second_bytes).hexdigest(),
+        )
+        store = ArtifactStore(
+            self.root,
+            snapshot_limit_bytes=len(self.input_bytes),
+            snapshot_total_limit_bytes=len(self.input_bytes) + len(second_bytes),
+        )
+        self.addCleanup(store.close)
+
+        with store.open_verified(self.input_reference) as first:
+            with store.open_verified(second_reference) as second_stream:
+                self.assertEqual(
+                    store._active_snapshot_bytes,
+                    len(self.input_bytes) + len(second_bytes),
+                )
+                self.assertEqual(first.read(), self.input_bytes)
+                self.assertEqual(second_stream.read(), second_bytes)
+            self.assertEqual(store._active_snapshot_bytes, len(self.input_bytes))
+        self.assertEqual(store._active_snapshot_bytes, 0)
+
+    def test_store_close_is_idempotent_with_active_snapshot(self):
+        store = ArtifactStore(
+            self.root,
+            snapshot_total_limit_bytes=len(self.input_bytes),
+        )
+        with store.open_verified(self.input_reference):
+            self.assertEqual(store._active_snapshot_bytes, len(self.input_bytes))
+            store.close()
+            store.close()
+        self.assertEqual(store._active_snapshot_bytes, 0)
+
+    def test_zero_byte_snapshot_and_zero_quota_behavior(self):
+        zero = self.root / "zero.bin"
+        zero.write_bytes(b"")
+        reference = ArtifactReference("zero.bin", hashlib.sha256(b"").hexdigest())
+        unlimited = ArtifactStore(self.root)
+        self.addCleanup(unlimited.close)
+        with unlimited.open_verified(reference) as stream:
+            self.assertEqual(stream.read(), b"")
+        self.assertEqual(unlimited._active_snapshot_bytes, 0)
+
+        limited = ArtifactStore(
+            self.root,
+            snapshot_limit_bytes=0,
+            snapshot_total_limit_bytes=0,
+        )
+        self.addCleanup(limited.close)
+        with limited.open_verified(reference) as stream:
+            self.assertEqual(stream.read(), b"")
+        self.assertEqual(limited._active_snapshot_bytes, 0)
+
+    def test_temporary_snapshot_write_failure_releases_reservation(self):
+        real_temporary_file = tempfile.TemporaryFile
+
+        class WriteFailureSnapshot:
+            def __init__(self):
+                self._delegate = real_temporary_file(mode="w+b")
+
+            def write(self, _data):
+                raise OSError("temporary snapshot write failed")
+
+            def flush(self):
+                return self._delegate.flush()
+
+            def seek(self, *args):
+                return self._delegate.seek(*args)
+
+            def fileno(self):
+                return self._delegate.fileno()
+
+            def close(self):
+                return self._delegate.close()
+
+        store = ArtifactStore(
+            self.root,
+            snapshot_limit_bytes=len(self.input_bytes),
+            snapshot_total_limit_bytes=len(self.input_bytes),
+        )
+        self.addCleanup(store.close)
+        with patch(
+            "tools.compiler_infrastructure.tempfile.TemporaryFile",
+            side_effect=lambda *args, **kwargs: WriteFailureSnapshot(),
+        ):
+            with self.assertRaisesRegex(OSError, "temporary snapshot write"):
+                with store.open_verified(self.input_reference):
+                    pass
+        self.assertEqual(store._active_snapshot_bytes, 0)
+
+    def test_temporary_snapshot_close_failure_releases_reservation(self):
+        real_temporary_file = tempfile.TemporaryFile
+
+        class CloseFailureSnapshot:
+            def __init__(self):
+                self._delegate = real_temporary_file(mode="w+b")
+                self.closed = False
+
+            def write(self, data):
+                return self._delegate.write(data)
+
+            def flush(self):
+                return self._delegate.flush()
+
+            def seek(self, *args):
+                return self._delegate.seek(*args)
+
+            def fileno(self):
+                return self._delegate.fileno()
+
+            def close(self):
+                if not self.closed:
+                    self.closed = True
+                    self._delegate.close()
+                    raise OSError("temporary snapshot close failed")
+
+        store = ArtifactStore(
+            self.root,
+            snapshot_limit_bytes=len(self.input_bytes),
+            snapshot_total_limit_bytes=len(self.input_bytes),
+        )
+        self.addCleanup(store.close)
+        with patch(
+            "tools.compiler_infrastructure.tempfile.TemporaryFile",
+            side_effect=lambda *args, **kwargs: CloseFailureSnapshot(),
+        ):
+            with self.assertRaisesRegex(OSError, "temporary snapshot close"):
+                with store.open_verified(self.input_reference):
+                    pass
+        self.assertEqual(store._active_snapshot_bytes, 0)
+
+    def test_source_mutation_during_snapshot_copy_is_rejected(self):
+        source = self.root / "source.bin"
+        real_temporary_file = tempfile.TemporaryFile
+        mutation_done = False
+
+        class MutatingSnapshot:
+            def __init__(self):
+                self._delegate = real_temporary_file(mode="w+b")
+
+            def write(self, data):
+                nonlocal mutation_done
+                if not mutation_done:
+                    mutation_done = True
+                    source.write_bytes(b"mutated during copy")
+                return self._delegate.write(data)
+
+            def flush(self):
+                return self._delegate.flush()
+
+            def seek(self, *args):
+                return self._delegate.seek(*args)
+
+            def fileno(self):
+                return self._delegate.fileno()
+
+            def close(self):
+                return self._delegate.close()
+
+        store = ArtifactStore(
+            self.root,
+            snapshot_total_limit_bytes=len(self.input_bytes),
+        )
+        self.addCleanup(store.close)
+        with patch(
+            "tools.compiler_infrastructure.tempfile.TemporaryFile",
+            side_effect=lambda *args, **kwargs: MutatingSnapshot(),
+        ):
+            with self.assertRaises(OSError):
+                with store.open_verified(self.input_reference):
+                    pass
+        self.assertEqual(store._active_snapshot_bytes, 0)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "named pipes are not supported")
     def test_artifact_store_rejects_fifo_without_blocking(self):

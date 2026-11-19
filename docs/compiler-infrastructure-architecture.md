@@ -1,35 +1,36 @@
 # Compiler Infrastructure Architecture Boundaries
 
 - **Status:** evidence map and boundary proposal; not an approved architecture.
-- **Updated:** 2026-11-13
+- **Updated:** 2026-11-19
 - **Repository snapshot:** `feat/compiler-infrastructure` at
-  `7165220562da2bb34bf2700ee844ad4a312e3b13`
+  `6c63c152972bd2e920ed72514dbb9bb7e4e1d6dd`
 - **Upstream reference:** `quantumlib/Qualtran` at
   `f559b12af459e7e97e6c6c382434431c03b903c9`
 
 ## Evidence classifications
 
-- **SOURCE-VERIFIED:** observed in the local repository or pinned upstream
-  implementation source.
-- **UPSTREAM-DOCUMENTED:** described by upstream API/build documentation; does
-  not make the feature a project interface.
-- **PAPER-DERIVED:** described in the competition paper; does not establish
-  executable verifier behavior.
-- **PROPOSED:** a candidate boundary only, requiring owner approval.
-- **UNVERIFIED:** available evidence does not settle the point.
-- **BLOCKED:** requires an authoritative project or competition source that
-  is not in this checkout.
+- **VERIFIED LOCALLY:** observed in local source or test execution.
+- **VERIFIED UPSTREAM:** observed in the pinned Qualtran/Kickmix source or
+  documentation; this does not establish project adoption.
+- **VERIFIED OFFICIAL:** observed in the official metric source only.
+- **PAPER-DERIVED:** described by the competition paper, not executable
+  verifier behavior.
+- **ENGINEERING PROPOSAL:** local interface or candidate boundary requiring
+  project-owner approval.
+- **BLOCKED:** requires an authoritative source or artifact not in this
+  checkout.
+- **UNKNOWN:** available evidence does not settle the point.
 
 ## Current project boundary
 
-**SOURCE-VERIFIED:** The committed project tree has `README.md`,
+**VERIFIED LOCALLY:** The committed project tree has `README.md`,
 `tools/verify_sha256.py`, and `tests/test_verify_sha256.py`. The checker
 validates a caller-supplied digest, opens and validates a descriptor,
 rejects non-regular files, rejects supported symlinks through `O_NOFOLLOW`,
 and hashes bytes with SHA-256 in 1 MiB chunks. It does not construct circuits, read benchmark input, serialize
 circuits, or call a verifier.
 
-**CURRENT WORKTREE / PROPOSED:** `tools/compiler_infrastructure.py` adds
+**ENGINEERING PROPOSAL:** The current worktree's `tools/compiler_infrastructure.py` adds
 compiler-neutral request/result contracts, injected executor and verifier
 protocols, a configured subprocess executor using a local JSON protocol,
 root-relative artifact management, and deterministic run manifests.
@@ -61,15 +62,20 @@ not APIs declared or adopted by this project:
 | `km.OperationStatistics` | Static operation counts; simulator can report shot-dependent counts when enabled. | Upstream API documented/source-inspected; not by itself the competition score. |
 | KMX/KMB readers/writers | KMX text and KMB v2 binary format at the pinned upstream revision. | Upstream format; verifier canonicalization/hash rules and cross-benchmark submission requirements remain unconfirmed. |
 
-Primary upstream evidence is linked at immutable commit paths in the dossier:
-`docs/kickmix/api_reference.md`, `docs/kickmix/kickmix_format.md`,
-`docs/kickmix/kickmix_binary_format.md`,
-`kickmix/src/kickmix/py/circuit/`, and
-`kickmix/src/kickmix/circuit/`. Build evidence is in the pinned
-`.bazelversion`, `MODULE.bazel`, `WORKSPACE`, `kickmix/BUILD`,
-`kickmix/pyproject.toml`, dev documentation, and Kickmix CI workflow.
+The source paths below are in the pinned upstream repository, not local
+`docs/kickmix/` files:
+[KMX format](https://github.com/quantumlib/Qualtran/blob/f559b12af459e7e97e6c6c382434431c03b903c9/docs/kickmix/kickmix_format.md),
+[KMX instructions](https://github.com/quantumlib/Qualtran/blob/f559b12af459e7e97e6c6c382434431c03b903c9/docs/kickmix/kickmix_instructions.md),
+[KMB format](https://github.com/quantumlib/Qualtran/blob/f559b12af459e7e97e6c6c382434431c03b903c9/docs/kickmix/kickmix_binary_format.md),
+[Python circuit bindings](https://github.com/quantumlib/Qualtran/tree/f559b12af459e7e97e6c6c382434431c03b903c9/kickmix/src/kickmix/py/circuit/),
+and [C++ circuit source](https://github.com/quantumlib/Qualtran/tree/f559b12af459e7e97e6c6c382434431c03b903c9/kickmix/src/kickmix/circuit/).
+Build evidence is likewise upstream-only: the pinned
+[`.bazelversion`](https://github.com/quantumlib/Qualtran/blob/f559b12af459e7e97e6c6c382434431c03b903c9/.bazelversion),
+[`MODULE.bazel`](https://github.com/quantumlib/Qualtran/blob/f559b12af459e7e97e6c6c382434431c03b903c9/MODULE.bazel),
+[`WORKSPACE`](https://github.com/quantumlib/Qualtran/blob/f559b12af459e7e97e6c6c382434431c03b903c9/WORKSPACE),
+and [`kickmix/BUILD`](https://github.com/quantumlib/Qualtran/blob/f559b12af459e7e97e6c6c382434431c03b903c9/kickmix/BUILD).
 
-## Candidate integration boundaries (PROPOSED only)
+## Candidate integration boundaries (ENGINEERING PROPOSAL only)
 
 The conceptual flow below is only a way to organize future compiler decisions.
 The implemented Python protocols are local infrastructure seams, not approved
@@ -121,10 +127,10 @@ These are readiness gates, not proposed official field names or requirements.
 
 | Integration | Readiness | Evidence and blocker |
 |---|---|---|
-| INVSQRT | **PARTIAL** | Paper-derived circuit/phase constraints exist. Official input fixture, canonical serialization/hash rules, verifier package and invocation remain unavailable. |
-| DQI | **PARTIAL** | Paper-derived mathematical semantics exist. Authoritative input schema, register/bit ordering, fixtures and verifier invocation remain unavailable. |
-| DFTHC-SOS | **PARTIAL** | Paper-derived oracle/address semantics exist. Data schema, tensor layout, reference artifacts and verifier invocation remain unavailable. |
-| Kickmix | **PARTIAL** | Pinned upstream APIs and formats are documented in the dossier, but project adoption, benchmark conversion rules and competition verification are unconfirmed. |
+| INVSQRT | **BLOCKED** | Paper-derived circuit/phase constraints are **PAPER-DERIVED**. Official input fixture, canonical serialization/hash rules, verifier package and invocation remain unavailable. |
+| DQI | **BLOCKED** | Mathematical semantics are **PAPER-DERIVED**. Authoritative input schema, register/bit ordering, fixtures and verifier invocation remain unavailable. |
+| DFTHC-SOS | **BLOCKED** | Oracle/address semantics are **PAPER-DERIVED**. Data schema, tensor layout, reference artifacts and verifier invocation remain unavailable. |
+| Kickmix | **VERIFIED UPSTREAM** | Pinned APIs and formats are source-backed; project adoption, benchmark conversion rules and competition verification remain **UNKNOWN** or **BLOCKED**. |
 | Official verifier/scorer | **BLOCKED** | No authoritative implementation, interface, immutable release or fixtures are present in this checkout. |
 
 ## Required owner decisions and consequences
@@ -149,3 +155,19 @@ These are readiness gates, not proposed official field names or requirements.
 Further compiler or benchmark code is **BLOCKED** until the required contracts
 arrive. The next implementation milestone is a reproducible baseline for the
 approved project entry point, not a speculative IR or adapter.
+
+## Local KMX compiler update — 2026-11-19
+
+The worktree now contains a scoped local KMX v2 compiler core in
+`tools/kickmix_compiler.py` and the adjacent-involution optimizer in
+`tools/participant_optimizer.py`. This changes the earlier statement that no
+local circuit parser/compiler exists: the implementation parses, validates,
+optimizes, and serializes KMX text. It does **not** make the local interface an
+approved project or competition API.
+
+The CLI and test evidence are documented in the
+[KMX compiler core](kickmix-compiler-core.md) and
+[completion matrix](implementation-completion-matrix.md). The competition's
+exact Kickmix build, benchmark adapters, official verifier, and benchmark
+acceptance remain blocked. No architecture decision is inferred from this
+local implementation.

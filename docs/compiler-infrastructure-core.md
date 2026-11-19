@@ -1,12 +1,17 @@
 # Compiler-Neutral Infrastructure Core
 
-- **Status:** implemented proposal; not an approved compiler or competition API.
+- **Status:** **VERIFIED LOCALLY** implementation; **ENGINEERING PROPOSAL**,
+  not an approved compiler or competition API.
 - **Date:** 2026-11-19
 - **Scope:** request validation, in-process and subprocess execution seams,
   injected verification, artifact integrity, deterministic manifests, and
   structured outcomes.
 - **Not covered:** quantum circuit semantics, compiler IR, benchmark adapters,
   official serialization, or competition acceptance.
+
+Evidence labels in this document use the audit taxonomy: **VERIFIED LOCALLY**,
+**VERIFIED UPSTREAM**, **VERIFIED OFFICIAL**, **PAPER-DERIVED**,
+**ENGINEERING PROPOSAL**, **BLOCKED**, or **UNKNOWN**.
 
 ## Contracts
 
@@ -109,14 +114,16 @@ reconstruct the configuration or establish the executable's content identity.
 
 `ArtifactStore.verify(reference)` returns the verified digest, not a path that
 could later be reopened against a changed pathname. Consumers that need the
-bytes can use `ArtifactStore.open_verified(reference)`, which yields a
-read-only stream held on the validated descriptor and rechecks the digest on
-context exit. During verifier handoff, `VerificationRequest.verified_artifacts`
-provides a read-only mapping from every input/output reference to its opened,
-verified stream; streams remain open for the verifier call and are checked
-again when it returns. Verifiers should consume these handles rather than
-reopening paths. Artifact paths are revalidated at the store boundary; runtime
-type annotations alone are not treated as input validation.
+bytes can use `ArtifactStore.open_verified(reference)`, which copies and hashes
+the content read from the validated descriptor into a private temporary file.
+It yields a read-only snapshot stream and rechecks the source digest when the
+consumer exits. During verifier handoff, `VerificationRequest.verified_artifacts`
+provides a read-only mapping from every input/output reference to its
+verified-snapshot stream. A concurrent source writer cannot change the bytes
+already handed to the verifier. Snapshot storage requires temporary-file space
+proportional to the artifact size; failures are surfaced rather than silently
+falling back to a live stream. Artifact paths are revalidated at the store
+boundary; runtime type annotations alone are not treated as input validation.
 
 ## Execution and artifact lifecycle
 
@@ -129,9 +136,10 @@ type annotations alone are not treated as input validation.
    existing run.
 4. Pass the executor an `ExecutionContext` containing the root, output
    directory, and explicit seed.
-5. Re-verify inputs after execution to detect compiler-side mutation. Reject
-   malformed results; require each declared output to resolve within the run
-   output directory and match its digest.
+5. Re-verify inputs after every executor outcome, including an exception,
+   malformed result, or reported compilation failure. Reject malformed
+   results; require each declared output to resolve within the run output
+   directory and match its digest.
 6. Invoke the configured verifier. Recheck input and output digests after
    handoff to detect mutations by the verifier. A missing verifier produces
    `UNAVAILABLE` and overall `BLOCKED`, never success.
@@ -151,12 +159,12 @@ fails, it reports an explicitly uncertain publication state and returns no
 manifest reference. The reference digest is computed from the serialized
 bytes before publication, so a descriptor-close error after successful sync
 returns the known published reference with a manifest-failure outcome. It
-records request data after redacting values under secret-like field names,
-input and output digests, Python implementation/version/platform/architecture,
-executor/verifier names and versions, safe subprocess configuration metadata,
-and verification outcome. It intentionally omits wall-clock timestamps to
-preserve deterministic manifest bytes and does not claim authenticated
-provenance.
+records request data after redacting values under secret-like field names
+in both success and failure manifests, input and output digests, Python
+implementation/version/platform/architecture, executor/verifier names and
+versions, safe subprocess configuration metadata, and verification outcome.
+It intentionally omits wall-clock timestamps to preserve deterministic
+manifest bytes and does not claim authenticated provenance.
 
 Reproducibility levels are: **0** result recorded; **1** inputs and complete
 configuration recorded; **2** toolchain and executable identity recorded;
@@ -214,6 +222,13 @@ Overall status rules:
 - File metadata is compared before/after hashing to detect ordinary concurrent
   changes; this does not provide an immutable snapshot against an adversary
   able to modify file contents while preserving observable metadata.
+- `open_verified` hands the verifier a private snapshot whose bytes were read
+  from a descriptor-validated source and hashed before handoff. This prevents
+  source-file writes during verifier consumption from changing its input.
+  Snapshot creation can consume temporary storage proportional to artifact
+  size; there is no separate snapshot-size or aggregate concurrency quota.
+  Oversized or concurrent artifacts can exhaust the temporary filesystem;
+  write failures are explicit, but disk capacity is not reserved.
 - Outputs are re-verified after verifier handoff and before manifest
   publication, but are not locked or snapshotted. A concurrent writer may
   change an output after the final hash check; the manifest records the checked
@@ -227,6 +242,10 @@ Overall status rules:
   any file it can access, including declared inputs. Input immutability is
   demonstrated only for the test doubles and checker behavior, not enforced
   against arbitrary plugins.
+- The verifier receives verified temporary snapshot streams through
+  `VerificationRequest.verified_artifacts`; `ExecutionContext` also exposes
+  artifact paths, so the infrastructure cannot prevent a verifier from
+  reopening a pathname instead of consuming the supplied stream.
 - This layer does not authenticate compilers, verifiers, inputs, or manifests.
 - The request seed is passed to the executor; the infrastructure does not
   control randomness inside an executor that ignores it.
@@ -244,22 +263,30 @@ penetration testing.
 | ID / severity | Finding and evidence | Fix and regression test |
 |---|---|---|
 | CINF-01 / MEDIUM | The earlier artifact flow resolved a path and reopened it, leaving a pathname replacement window. | Retained root descriptor, `openat`-style `dir_fd` traversal and descriptor-backed verification. Covered by `test_artifact_descriptor_stays_anchored_if_root_path_is_replaced`, `test_artifact_store_rejects_symlinked_file`, and `test_artifact_store_rejects_symlinked_intermediate_directory`. |
-| CINF-02 / MEDIUM | Inputs were not rechecked after execution, and outputs could change after their initial digest check or during verifier handoff. | Reverify inputs after executor and verifier; reverify outputs after verifier. Covered by `test_executor_input_mutation_is_detected`, `test_verifier_output_mutation_is_detected_after_handoff`, and `test_open_verified_detects_mutation_during_consumer_use`. |
+| CINF-02 / MEDIUM | Executor-side input mutation was checked only after a successful compilation result; outputs could also change during verifier handoff. | Inputs are reverified after every executor outcome and after verifier handoff; outputs are reverified after verifier handoff. Covered by `test_executor_input_mutation_is_detected`, `test_executor_input_mutation_is_detected_when_executor_raises`, `test_executor_input_mutation_is_detected_when_compilation_fails`, and `test_verifier_output_mutation_is_detected_after_handoff`. |
 | CINF-03 / LOW | Writing the final manifest directly could leave a partial file after interruption. | Write/fsync a unique temporary file, publish with an exclusive hard link, fsync directory. Covered by `test_manifest_publication_is_exclusive_and_corruption_detected` and `test_concurrent_manifest_publication_has_single_winner`. |
 | CINF-04 / LOW | Existing run-directory setup checked the path after creation without anchoring operations to the artifact root. | Descriptor-relative directory creation; ID collisions remain exclusive and are not overwritten. Covered by `test_duplicate_run_id_cannot_overwrite_existing_run` and `test_concurrent_run_creation_has_single_winner`. |
 | CINF-05 / LOW | The SHA-256 CLI included the supplied path in success and mismatch output and full `OSError` text in failures, potentially exposing local path details. | Report status/digests or the error reason without echoing paths. Covered by `test_file_error_does_not_disclose_full_path` and `test_fails_for_digest_mismatch`. |
 | CINF-06 / MEDIUM | Request option nesting and serialized size, reference counts, diagnostic payloads, and seed magnitude lacked consistent bounds, permitting excessive work or serialization failure from caller-owned data. | Limit nesting to 64, option values to 100,000, strings to 1,000,000 characters, references to 10,000, seed integers to 4096 bits, diagnostics to 1,000 entries/1,000,000 characters, and manifests to 16 MiB. Covered by `test_request_validation_and_immutable_options_snapshot` and `test_manifest_size_limit_is_enforced`. |
 | CINF-07 / MEDIUM | `ArtifactStore.verify` relied on its type annotation; a custom object with `path="../outside"` reached descriptor-relative traversal and could read a file outside the root. This was reproduced before correction. | `_open_artifact` now requires an `ArtifactReference` and revalidates its path before opening. Covered by `test_artifact_store_rejects_unvalidated_reference_type`. |
 | CINF-08 / MEDIUM | A directory `fsync` failure after publishing `manifest.json` raised an error while leaving the file visible, so the caller reported no reference and a retry could not publish. A directory-descriptor close error after publication had the same missing-reference problem and could mask an earlier failure. | The store attempts to unlink and sync a failed publication; reports uncertain state if rollback fails; computes the reference before publication and includes it if descriptor close fails after successful sync. Covered by `test_directory_fsync_failure_removes_published_manifest`, `test_manifest_rollback_sync_failure_is_reported_as_uncertain`, `test_manifest_directory_close_failure_returns_published_reference`, `test_failure_manifest_close_failure_returns_published_reference`, and `test_directory_close_failure_does_not_mask_rollback_uncertainty`. |
+| CINF-09 / MEDIUM | Failure manifests stored unredacted request options; the early input-integrity failure path could also include unredacted executor diagnostics. | Failure manifests now redact secret-like request fields, and returned compilation diagnostics are redacted before integrity-failure publication. Covered by `test_failure_manifests_redact_sensitive_request_values` and `test_input_mutation_failure_manifest_redacts_executor_diagnostics`. |
+| CINF-10 / MEDIUM | A verifier reading the live artifact descriptor could observe concurrent content changes that were restored before the post-use digest check. | `open_verified` now copies and hashes into a private temporary snapshot before handoff; the consumer cannot observe subsequent source-file changes. Covered by `test_open_verified_snapshot_is_stable_if_source_changes_and_is_restored`. |
+| CINF-11 / MEDIUM | Snapshot creation duplicates every verified artifact into temporary storage, with no per-artifact or aggregate size quota. A large artifact set can exhaust that filesystem and block verification. | The infrastructure reports temporary-file write failures and does not fall back to live streams. A safe quota requires an approved artifact-size/resource policy; no unverified limit was introduced. |
+
+Phase 9 adds opt-in `snapshot_limit_bytes` and
+`snapshot_total_limit_bytes` constructor parameters. They have no production
+defaults, so this change provides enforcement when explicitly configured but
+does not claim that an approved resource policy has been established.
 
 The existing tests do not establish resistance to a malicious in-process
-executor/verifier, filesystem content changes that evade available metadata
-checks, storage-device failure, permission-denied behavior under every
+executor/verifier, concurrent file-content mutation that is restored before a
+post-check, storage-device failure, permission-denied behavior under every
 privilege model, or every POSIX filesystem's hard-link/fsync guarantees.
 
 ## Reproducible validation
 
-From the repository root, with Python 3.8 or newer on the supported POSIX
+From the repository root, with Python 3.10 or newer on the supported POSIX
 filesystem described above:
 
 ```sh

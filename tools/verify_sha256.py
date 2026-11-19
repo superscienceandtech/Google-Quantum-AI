@@ -2,10 +2,13 @@
 """Verify a file against an expected SHA-256 digest."""
 
 import argparse
+import errno
 import hashlib
+import os
+import stat
 import sys
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import BinaryIO, Optional, Sequence
 
 
 _CHUNK_SIZE = 1024 * 1024
@@ -20,12 +23,33 @@ def parse_sha256(value: str) -> str:
     return value.lower()
 
 
-def sha256_file(path: Path) -> str:
+def sha256_stream(artifact: BinaryIO) -> str:
+    """Hash bytes from the current position of an already-open binary stream."""
     digest = hashlib.sha256()
-    with path.open("rb") as artifact:
-        while chunk := artifact.read(_CHUNK_SIZE):
-            digest.update(chunk)
+    while chunk := artifact.read(_CHUNK_SIZE):
+        digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", path)
+
+        with os.fdopen(descriptor, "rb", closefd=True) as artifact:
+            descriptor = -1
+            digest = sha256_stream(artifact)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    return digest
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -41,18 +65,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         actual_sha256 = sha256_file(arguments.file)
     except OSError as error:
-        print(f"ERROR: cannot read {arguments.file}: {error}", file=sys.stderr)
+        print(
+            f"ERROR: cannot read input: {error.strerror or type(error).__name__}",
+            file=sys.stderr,
+        )
         return 2
 
     if actual_sha256 != arguments.expected_sha256:
         print(
-            f"ERROR: SHA-256 mismatch for {arguments.file}: "
+            "ERROR: SHA-256 mismatch: "
             f"expected {arguments.expected_sha256}, got {actual_sha256}",
             file=sys.stderr,
         )
         return 1
 
-    print(f"OK: SHA-256 verified for {arguments.file}")
+    print("OK: SHA-256 verified")
     return 0
 
 

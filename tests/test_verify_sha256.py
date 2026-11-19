@@ -1,5 +1,6 @@
 import argparse
 import hashlib
+import os
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,7 @@ class Sha256CliTests(unittest.TestCase):
             check=False,
             capture_output=True,
             text=True,
+            timeout=5,
         )
 
     def test_succeeds_for_matching_digest(self) -> None:
@@ -66,17 +68,19 @@ class Sha256CliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertIn("SHA-256 verified", result.stdout)
+        self.assertNotIn(str(path), result.stdout)
         self.assertEqual(result.stderr, "")
 
     def test_fails_for_digest_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "artifact.bin"
+            path = Path(directory) / "private-artifact-name.bin"
             path.write_bytes(b"known artifact")
 
             result = self.run_cli(path, "0" * 64)
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("SHA-256 mismatch", result.stderr)
+        self.assertNotIn(str(path), result.stderr)
 
     def test_reports_unreadable_or_missing_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -87,9 +91,46 @@ class Sha256CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("cannot read", result.stderr)
 
+    def test_file_error_does_not_disclose_full_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "private-artifact-name.bin"
+
+            result = self.run_cli(path, "0" * 64)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read", result.stderr)
+        self.assertNotIn(str(path), result.stderr)
+
     def test_reports_directory_as_read_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = self.run_cli(Path(directory), "0" * 64)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("cannot read", result.stderr)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "named pipes are not supported")
+    def test_rejects_named_pipe_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "artifact.fifo"
+            os.mkfifo(path)
+
+            result = self.run_cli(path, "0" * 64)
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not a regular file", result.stderr)
+
+    @unittest.skipUnless(
+        hasattr(os, "O_NOFOLLOW") and hasattr(os, "symlink"),
+        "symbolic-link blocking is not supported",
+    )
+    def test_rejects_symbolic_link_without_following(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "target.bin"
+            target.write_bytes(b"target contents")
+            link = Path(directory) / "artifact.bin"
+            os.symlink(target, link)
+
+            result = self.run_cli(link, hashlib.sha256(b"target contents").hexdigest())
 
         self.assertEqual(result.returncode, 2)
         self.assertIn("cannot read", result.stderr)
